@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Show Public Buckets in S3
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    Description: >-
+      Name of the environment that this stack creates (e.g. 'dev', 'qa',
+      'dev-branch', etc.).
+  StackVersion:
+    Type: String
+    Default: v0001
+    Description: >-
+      Stack version that this stack creates (e.g. 'v0001', 'v0002'). This stack
+      can be created side by side with existing stack, but will be used for some
+      specific deployment.   
+  DeliveryChannelExists:
+    Type: String
+    Description: Do you have an existing AWS Config delivery channel?
+    Default: 'false'
+    AllowedValues:
+    - 'false'
+    - 'true'
+  ResourceName:
+    Type: String
+    Default: ConfigS3PublicAccessTracker
+    AllowedValues:
+    - ConfigS3PublicAccessTracker
+    Description: Name of Resources created.  
+  SNSTopic:
+    Description: SNS topic to send notifications for current bucket policies
+    Type: String
+  EmailAddress:
+    Description: Email Address for sending SNS notifications for Config Events
+    Type: String
+  ConfigRuleNameAccess:
+    Type: String
+    Default: s3-bucket-level-public-access-prohibited
+    Description: The name that you assign to the AWS Config rule.
+    MinLength: '1'
+    ConstraintDescription: This parameter is required.
+Conditions:
+  CreateDeliveryChannel:
+    Fn::Equals:
+    - Ref: DeliveryChannelExists
+    - 'false'  
+
+Resources:
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Properties:
+      Name: 'pushrecord'
+      RecordingGroup:
+        ResourceTypes:
+        - AWS::S3::Bucket
+      RoleARN:
+        Fn::GetAtt:
+        - ConfigRoleRecorder
+        - Arn
+
+  DeliveryChannel:
+    Condition: CreateDeliveryChannel
+    Type: AWS::Config::DeliveryChannel
+    Properties:
+      ConfigSnapshotDeliveryProperties:
+        DeliveryFrequency: Six_Hours
+      S3BucketName:
+        Ref: ConfigBucket
+      SnsTopicARN:
+        Ref: ConfigTopic
+
+  ConfigBucket:
+    Type: AWS::S3::Bucket
+  AWSConfigRuleForPublicReadBuckets:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName:
+        Ref: ConfigRuleNameAccess
+      Description: Checks that your S3 buckets do not allow public access. If
+        an S3 bucket policy allows public access, the bucket isnoncompliant.
+      InputParameters: {}
+      Scope:
+        ComplianceResourceTypes:
+        - AWS::S3::Bucket
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_LEVEL_PUBLIC_ACCESS_PROHIBITED
+    DependsOn:
+    - ConfigRecorder
+
+  ConfigTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+      - Endpoint:
+          Ref: EmailAddress
+        Protocol: email
+
+  ConfigTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: ConfigTopicPolicy
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: config.amazonaws.com
+          Action: SNS:Publish
+          Resource: "*"
+      Topics:
+      - Ref: ConfigTopic
+      
+  OpenBucketAlertSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+      - Endpoint:
+          Ref: EmailAddress
+        Protocol: email
+
+  OpenBucketAlertSNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: Id-Open-Bucket-Notifications
+        Version: '2012-10-17'
+        Statement:
+        - Sid: Sid-Open-Bucket-Notifications
+          Effect: Allow
+          Principal:
+            Service: events.amazonaws.com
+          Action: sns:Publish
+          Resource: "*"
+      Topics:
+      - Ref: OpenBucketAlertSNSTopic
+
+  ConfigRoleRecorder:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - config.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSConfigRole
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: s3:GetBucketAcl
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:s3:::'
+                - Ref: ConfigBucket
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:s3:::'
+                - Ref: ConfigBucket
+                - "/AWSLogs/"
+                - Ref: AWS::AccountId
+                - "/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+          - Effect: Allow
+            Action: config:Put*
+            Resource: "*"
+
+  MySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref 'EmailAddress'
+      Protocol: email
+      TopicArn: !Ref 'ConfigTopic'
